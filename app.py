@@ -1,4 +1,5 @@
 import os
+import os
 import tempfile
 import streamlit as st
 from langchain_community.document_loaders import PyPDFLoader
@@ -10,9 +11,10 @@ from langchain.chains import RetrievalQA
 from qdrant_client import QdrantClient, models
 import time
 import math
+import requests
 
 # App title
-st.title("Egyptian History Chatbot")
+st.title("📚 RAG with Ollama, Qdrant, and LangChain")
 
 # Initialize Qdrant client with better error handling
 @st.cache_resource
@@ -64,7 +66,26 @@ def get_qdrant_client():
             st.info("Please configure Qdrant Cloud credentials or ensure local Qdrant is running")
             return None
 
-# Initialize embedding model
+# Check if Ollama is available and has the required model
+def check_ollama_model(base_url, model_name):
+    try:
+        # Check if Ollama service is running
+        response = requests.get(f"{base_url}/api/tags")
+        if response.status_code != 200:
+            return False, "Ollama service is not available"
+        
+        # Check if the model is available
+        models = response.json().get("models", [])
+        available_models = [model["name"] for model in models]
+        
+        if model_name not in available_models:
+            return False, f"Model '{model_name}' not found. Available models: {', '.join(available_models)}"
+        
+        return True, "Model is available"
+    except Exception as e:
+        return False, f"Error checking Ollama: {str(e)}"
+
+# Initialize embedding model with better error handling
 @st.cache_resource
 def get_embeddings():
     # Try to get Ollama URL from environment variable with fallbacks
@@ -79,21 +100,44 @@ def get_embeddings():
             continue
         
         try:
-            embeddings = OllamaEmbeddings(
-                model="nomic-embed-text",
-                base_url=url
-            )
-            # Test the embeddings
-            embeddings.embed_query("test")
-            return embeddings
+            # Check if Ollama is available and has the embedding model
+            model_available, message = check_ollama_model(url, "nomic-embed-text")
+            if not model_available:
+                st.warning(f"Ollama at {url}: {message}")
+                # Try to pull the model if it's not available
+                try:
+                    pull_response = requests.post(
+                        f"{url}/api/pull",
+                        json={"name": "nomic-embed-text"}
+                    )
+                    if pull_response.status_code == 200:
+                        st.success(f"Successfully pulled nomic-embed-text model")
+                        model_available = True
+                    else:
+                        st.error(f"Failed to pull model: {pull_response.text}")
+                except Exception as pull_error:
+                    st.error(f"Error pulling model: {str(pull_error)}")
+                    continue
+            
+            if model_available:
+                embeddings = OllamaEmbeddings(
+                    model="nomic-embed-text",
+                    base_url=url
+                )
+                # Test the embeddings
+                test_embedding = embeddings.embed_query("test")
+                if len(test_embedding) > 0:
+                    st.success(f"Successfully connected to Ollama embeddings at {url}")
+                    return embeddings
         except Exception as e:
+            st.warning(f"Failed to connect to Ollama at {url}: {str(e)}")
             continue
     
     st.error("Could not connect to Ollama embedding service")
-    st.info("Please ensure Ollama is running or set OLLAMA_BASE_URL environment variable")
+    st.info("Please ensure Ollama is running with the nomic-embed-text model")
     return None
 
-# Initialize LLM
+# Initialize LLM with better error handling
 @st.cache_resource
 def get_llm():
     # Try to get Ollama URL from environment variable with fallbacks
@@ -108,17 +152,25 @@ def get_llm():
             continue
         
         try:
+            # Check if Ollama is available
+            response = requests.get(f"{url}/api/tags")
+            if response.status_code != 200:
+                st.warning(f"Ollama service at {url} is not available")
+                continue
+                
             llm = ChatOllama(
                 base_url=url,
                 model="mistral",
                 temperature=0.1
             )
+            st.success(f"Successfully connected to Ollama LLM at {url}")
             return llm
         except Exception as e:
+            st.warning(f"Failed to connect to Ollama LLM at {url}: {str(e)}")
             continue
     
     st.error("Could not connect to Ollama LLM service")
-    st.info("Please ensure Ollama is running or set OLLAMA_BASE_URL environment variable")
+    st.info("Please ensure Ollama is running with the mistral model")
     return None
 
 def process_document(file, progress_bar=None, status_text=None):
@@ -246,6 +298,33 @@ def process_document(file, progress_bar=None, status_text=None):
 with st.sidebar:
     st.header("Document Processing")
     
+    # Ollama configuration section
+    st.subheader("Ollama Configuration")
+    
+    # Show current configuration
+    ollama_url = os.environ.get("OLLAMA_BASE_URL", "")
+    if ollama_url:
+        st.success(f"Ollama URL configured: {ollama_url}")
+    else:
+        st.warning("Ollama URL not configured")
+        
+    # Allow setting configuration in the UI
+    with st.expander("Configure Ollama"):
+        ollama_url_input = st.text_input("Ollama URL", value=ollama_url or "http://localhost:11434")
+        
+        if st.button("Save Ollama Configuration"):
+            # In Streamlit Cloud, we can't modify environment variables directly
+            # This is a workaround to store them in session state
+            st.session_state.ollama_url = ollama_url_input
+            
+            # Update the environment variables for the current session
+            os.environ["OLLAMA_BASE_URL"] = ollama_url_input
+            
+            # Clear the cached client to force recreation
+            st.cache_resource.clear()
+            st.success("Ollama configuration updated. Reconnecting...")
+            st.experimental_rerun()
+    
     # Qdrant configuration section
     st.subheader("Qdrant Configuration")
     
@@ -370,51 +449,8 @@ if prompt := st.chat_input("Ask a question about your document"):
     elif embeddings is None:
         with st.chat_message("assistant"):
             st.error("Embedding model not available. Please configure Ollama connection.")
-            st.session_state.messages.append({"role": "assistant", "content": "Sorry, I can't answer your question because the embedding model is not available. Please configure the Ollama connection."})
+            st.session_state.messages.append({"role": "assistant", "content": "Sorry, I can't answer your question because the embedding model is not available. Please configure the Ollama connection in the sidebar and ensure the nomic-embed-text model is installed."})
     elif llm is None:
         with st.chat_message("assistant"):
             st.error("LLM not available. Please configure Ollama connection.")
-            st.session_state.messages.append({"role": "assistant", "content": "Sorry, I can't answer your question because the language model is not available. Please configure the Ollama connection."})
-    elif "collection_name" not in st.session_state:
-        with st.chat_message("assistant"):
-            st.error("No collection selected. Please process a document first.")
-            st.session_state.messages.append({"role": "assistant", "content": "Sorry, I can't answer your question because no document collection is selected. Please upload and process a document first."})
-    else:
-        collection_name = st.session_state.collection_name
-        
-        try:
-            vectorstore = Qdrant(
-                client=client,
-                collection_name=collection_name,
-                embeddings=embeddings
-            )
-            # Increase k for large documents to get more context
-            retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
-            
-            with st.chat_message("assistant"):
-                answer_container = st.empty()
-                
-                with st.spinner("Thinking..."):
-                    qa_chain = RetrievalQA.from_chain_type(
-                        llm=llm,
-                        retriever=retriever,
-                        chain_type="stuff",
-                        return_source_documents=True
-                    )
-                    response = qa_chain({"query": prompt})
-                    answer = response["result"]
-                    
-                    # Optional: Display source documents in an expandable section
-                    with st.expander("View Source Documents"):
-                        for i, doc in enumerate(response["source_documents"]):
-                            st.markdown(f"**Source {i+1}:**")
-                            st.markdown(doc.page_content)
-                            st.markdown("---")
-                
-                answer_container.markdown(answer)
-                
-                st.session_state.messages.append({"role": "assistant", "content": answer})
-        except Exception as e:
-            with st.chat_message("assistant"):
-                st.error(f"Error retrieving answer: {str(e)}")
-                st.session_state.messages.append({"role": "assistant", "content": f"Sorry, I encountered an error: {str(e)}"})
+            st.session_state.messages.append({"role": "assistant", "content": "Sorry, I can't answer your question because the language model is not available. Please
