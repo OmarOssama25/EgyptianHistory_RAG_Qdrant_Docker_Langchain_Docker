@@ -14,74 +14,112 @@ import math
 # App title
 st.title("Egyptian History Chatbot")
 
-# Initialize Qdrant client with fallback options
+# Initialize Qdrant client with better error handling
 @st.cache_resource
 def get_qdrant_client():
-    # Try to get configuration from environment variables
+    # Check for Qdrant Cloud configuration
     qdrant_url = os.environ.get("QDRANT_URL")
     qdrant_api_key = os.environ.get("QDRANT_API_KEY")
     
-    # If Qdrant Cloud URL is provided, use it
+    # If Qdrant Cloud credentials are available, use them
     if qdrant_url and qdrant_api_key:
-        st.success("Using Qdrant Cloud")
-        return QdrantClient(
-            url=qdrant_url,
-            api_key=qdrant_api_key,
-        )
-    # Otherwise, try local Qdrant
-    else:
         try:
-            host = os.environ.get("QDRANT_HOST", "qdrant")
-            port = int(os.environ.get("QDRANT_PORT", "6333"))
-            
             client = QdrantClient(
-                host=host,
-                port=port,
-                prefer_grpc=True,
-                timeout=10.0  # Add timeout to fail faster
+                url=qdrant_url,
+                api_key=qdrant_api_key,
             )
             # Test connection
             client.get_collections()
-            st.success("Using local Qdrant")
+            st.success("Connected to Qdrant Cloud")
             return client
         except Exception as e:
-            st.warning(f"Could not connect to local Qdrant: {str(e)}")
-            st.info("Please set QDRANT_URL and QDRANT_API_KEY environment variables for Qdrant Cloud")
-            # Return a dummy client that will be replaced when proper credentials are provided
+            st.error(f"Failed to connect to Qdrant Cloud: {str(e)}")
+    
+    # Try local Qdrant (for development)
+    try:
+        # Try localhost first (for local development without Docker)
+        client = QdrantClient(
+            host="localhost",
+            port=6333,
+            timeout=5.0  # Short timeout to fail fast
+        )
+        # Test connection
+        client.get_collections()
+        st.success("Connected to local Qdrant")
+        return client
+    except Exception as local_error:
+        try:
+            # Try Docker container name (for Docker Compose setup)
+            client = QdrantClient(
+                host="qdrant",
+                port=6333,
+                timeout=5.0
+            )
+            # Test connection
+            client.get_collections()
+            st.success("Connected to Qdrant in Docker")
+            return client
+        except Exception as docker_error:
+            st.error("Could not connect to any Qdrant instance")
+            st.info("Please configure Qdrant Cloud credentials or ensure local Qdrant is running")
             return None
 
 # Initialize embedding model
 @st.cache_resource
 def get_embeddings():
-    # Try to get Ollama URL from environment variable
-    ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434")
+    # Try to get Ollama URL from environment variable with fallbacks
+    ollama_urls = [
+        os.environ.get("OLLAMA_BASE_URL"),
+        "http://ollama:11434",
+        "http://localhost:11434"
+    ]
     
-    try:
-        return OllamaEmbeddings(
-            model="nomic-embed-text",
-            base_url=ollama_url
-        )
-    except Exception as e:
-        st.warning(f"Could not connect to Ollama embedding service: {str(e)}")
-        st.info("Please ensure Ollama is running or set OLLAMA_BASE_URL environment variable")
-        return None
+    for url in ollama_urls:
+        if not url:
+            continue
+        
+        try:
+            embeddings = OllamaEmbeddings(
+                model="nomic-embed-text",
+                base_url=url
+            )
+            # Test the embeddings
+            embeddings.embed_query("test")
+            return embeddings
+        except Exception as e:
+            continue
+    
+    st.error("Could not connect to Ollama embedding service")
+    st.info("Please ensure Ollama is running or set OLLAMA_BASE_URL environment variable")
+    return None
 
 # Initialize LLM
 @st.cache_resource
 def get_llm():
-    # Try to get Ollama URL from environment variable
-    ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434")
+    # Try to get Ollama URL from environment variable with fallbacks
+    ollama_urls = [
+        os.environ.get("OLLAMA_BASE_URL"),
+        "http://ollama:11434",
+        "http://localhost:11434"
+    ]
     
-    try:
-        return ChatOllama(
-            base_url=ollama_url,
-            model="mistral",
-            temperature=0.1
-        )
-    except Exception as e:
-        st.warning(f"Could not connect to Ollama LLM service: {str(e)}")
-        st.info("Please ensure Ollama is running or set OLLAMA_BASE_URL environment variable")
-        return None
+    for url in ollama_urls:
+        if not url:
+            continue
+        
+        try:
+            llm = ChatOllama(
+                base_url=url,
+                model="mistral",
+                temperature=0.1
+            )
+            return llm
+        except Exception as e:
+            continue
+    
+    st.error("Could not connect to Ollama LLM service")
+    st.info("Please ensure Ollama is running or set OLLAMA_BASE_URL environment variable")
+    return None
 
 def process_document(file, progress_bar=None, status_text=None):
     with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
@@ -222,7 +260,7 @@ with st.sidebar:
     with st.expander("Configure Qdrant Cloud"):
         qdrant_url_input = st.text_input("Qdrant URL", value=qdrant_url)
         qdrant_api_key_input = st.text_input("Qdrant API Key", type="password", 
-                                        value=os.environ.get("QDRANT_API_KEY", ""))
+                                           value=os.environ.get("QDRANT_API_KEY", ""))
         
         if st.button("Save Qdrant Configuration"):
             # In Streamlit Cloud, we can't modify environment variables directly
@@ -256,8 +294,8 @@ with st.sidebar:
             "Select an existing collection", 
             options=collection_names,
             index=0 if "collection_name" not in st.session_state else 
-            collection_names.index(st.session_state.collection_name) if 
-            st.session_state.collection_name in collection_names else 0
+                  collection_names.index(st.session_state.collection_name) if 
+                  st.session_state.collection_name in collection_names else 0
         )
         
         if st.button("Use Selected Collection"):
@@ -326,13 +364,21 @@ if prompt := st.chat_input("Ask a question about your document"):
     
     # Check if all required components are available
     if client is None:
-        st.error("Qdrant client not available. Please configure Qdrant connection.")
+        with st.chat_message("assistant"):
+            st.error("Qdrant client not available. Please configure Qdrant connection.")
+            st.session_state.messages.append({"role": "assistant", "content": "Sorry, I can't answer your question because the Qdrant database is not available. Please configure the Qdrant connection in the sidebar."})
     elif embeddings is None:
-        st.error("Embedding model not available. Please configure Ollama connection.")
+        with st.chat_message("assistant"):
+            st.error("Embedding model not available. Please configure Ollama connection.")
+            st.session_state.messages.append({"role": "assistant", "content": "Sorry, I can't answer your question because the embedding model is not available. Please configure the Ollama connection."})
     elif llm is None:
-        st.error("LLM not available. Please configure Ollama connection.")
+        with st.chat_message("assistant"):
+            st.error("LLM not available. Please configure Ollama connection.")
+            st.session_state.messages.append({"role": "assistant", "content": "Sorry, I can't answer your question because the language model is not available. Please configure the Ollama connection."})
     elif "collection_name" not in st.session_state:
-        st.error("No collection selected. Please process a document first.")
+        with st.chat_message("assistant"):
+            st.error("No collection selected. Please process a document first.")
+            st.session_state.messages.append({"role": "assistant", "content": "Sorry, I can't answer your question because no document collection is selected. Please upload and process a document first."})
     else:
         collection_name = st.session_state.collection_name
         
