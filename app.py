@@ -451,6 +451,6 @@ if prompt := st.chat_input("Ask a question about your document"):
             st.error("Embedding model not available. Please configure Ollama connection.")
             st.session_state.messages.append({"role": "assistant", "content": "Sorry, I can't answer your question because the embedding model is not available. Please configure the Ollama connection in the sidebar and ensure the nomic-embed-text model is installed."})
     elif llm is None:
-        with st.chat_message("assistant"):
-            st.error("LLM not available. Please configure Ollama connection.")
-            st.session_state.messages.append({"role": "assistant", "content": "Sorry, I can't answer your question because the language model is not available. Please
+    with st.chat_message("assistant"):
+        st.error("LLM not available. Please configure Ollama connection.")
+        st.session_state.messages.append({"role": "assistant", "content": "Sorry, I can't answer your question because the language model is not available. Please configure the Ollama connection in the sidebar."})
