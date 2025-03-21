@@ -3,30 +3,37 @@ import tempfile
 import streamlit as st
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_ollama import OllamaEmbeddings
 from langchain_qdrant import Qdrant
-from langchain_ollama import ChatOllama
-from langchain.chains import RetrievalQA
 from qdrant_client import QdrantClient, models
 import time
 import math
 import requests
+from typing import List, Optional
 
-# Try to import alternative embedding models and LLMs
+# Try to import Ollama-specific modules, but have fallbacks
 try:
-    from langchain_openai import OpenAIEmbeddings, ChatOpenAI
-    OPENAI_AVAILABLE = True
+    from langchain_ollama import OllamaEmbeddings, ChatOllama
+    OLLAMA_AVAILABLE = True
 except ImportError:
-    OPENAI_AVAILABLE = False
+    OLLAMA_AVAILABLE = False
 
+# Import alternative embedding models
 try:
-    from langchain_huggingface import HuggingFaceEmbeddings, HuggingFaceEndpoint
-    HUGGINGFACE_AVAILABLE = True
+    from langchain_huggingface import HuggingFaceEmbeddings
+    HF_EMBEDDINGS_AVAILABLE = True
 except ImportError:
-    HUGGINGFACE_AVAILABLE = False
+    HF_EMBEDDINGS_AVAILABLE = False
+
+# Import alternative LLMs
+try:
+    from langchain_community.llms import HuggingFacePipeline
+    from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+    HF_PIPELINE_AVAILABLE = True
+except ImportError:
+    HF_PIPELINE_AVAILABLE = False
 
 # App title
-st.title("📚 RAG with Qdrant and LangChain")
+st.title("📚 RAG with Open-Source Models")
 
 # Initialize Qdrant client with better error handling
 @st.cache_resource
@@ -86,106 +93,116 @@ def is_ollama_available(base_url):
     except:
         return False
 
-# Get embeddings with fallbacks
+# Initialize embedding model with fallbacks
 @st.cache_resource
 def get_embeddings():
-    # Try Ollama first (preferred option)
-    ollama_urls = [
-        os.environ.get("OLLAMA_BASE_URL"),
-        "http://ollama:11434",
-        "http://localhost:11434"
-    ]
-    
-    for url in ollama_urls:
-        if not url:
-            continue
+    # First try Ollama if available
+    if OLLAMA_AVAILABLE:
+        ollama_urls = [
+            os.environ.get("OLLAMA_BASE_URL"),
+            "http://ollama:11434",
+            "http://localhost:11434"
+        ]
         
-        if is_ollama_available(url):
-            try:
-                embeddings = OllamaEmbeddings(
-                    model="nomic-embed-text",
-                    base_url=url
-                )
-                # Test the embeddings
-                embeddings.embed_query("test")
-                st.success(f"Using Ollama embeddings (nomic-embed-text) at {url}")
-                return embeddings
-            except Exception as e:
-                st.warning(f"Ollama available but embedding failed: {str(e)}")
+        for url in ollama_urls:
+            if not url:
+                continue
+            
+            if is_ollama_available(url):
+                try:
+                    embeddings = OllamaEmbeddings(
+                        model="nomic-embed-text",
+                        base_url=url
+                    )
+                    # Test the embeddings
+                    embeddings.embed_query("test")
+                    st.success(f"Using Ollama embeddings with nomic-embed-text")
+                    return embeddings
+                except Exception as e:
+                    st.warning(f"Failed to use Ollama embeddings: {str(e)}")
     
-    # Try OpenAI embeddings if available
-    if OPENAI_AVAILABLE and os.environ.get("OPENAI_API_KEY"):
+    # Fallback to Hugging Face embeddings
+    if HF_EMBEDDINGS_AVAILABLE:
         try:
-            embeddings = OpenAIEmbeddings()
-            st.success("Using OpenAI embeddings (fallback)")
-            return embeddings
-        except Exception as e:
-            st.warning(f"OpenAI embeddings failed: {str(e)}")
-    
-    # Try HuggingFace embeddings if available
-    if HUGGINGFACE_AVAILABLE:
-        try:
-            # Try using a sentence-transformer model that's similar to nomic-embed-text
+            # Try GTE-Small (a good open-source model)
             embeddings = HuggingFaceEmbeddings(
-                model_name="BAAI/bge-large-en-v1.5"
+                model_name="thenlper/gte-small",
+                cache_folder="./models"
             )
-            st.success("Using HuggingFace embeddings (fallback)")
+            st.success("Using Hugging Face GTE-Small embeddings")
             return embeddings
         except Exception as e:
-            st.warning(f"HuggingFace embeddings failed: {str(e)}")
+            st.warning(f"Failed to load GTE-Small: {str(e)}")
+            
+            try:
+                # Try another lightweight model
+                embeddings = HuggingFaceEmbeddings(
+                    model_name="sentence-transformers/all-MiniLM-L6-v2",
+                    cache_folder="./models"
+                )
+                st.success("Using Hugging Face MiniLM embeddings")
+                return embeddings
+            except Exception as e2:
+                st.error(f"Failed to load alternative embeddings: {str(e2)}")
     
-    st.error("No embedding models available. Please configure at least one embedding provider.")
+    st.error("No embedding models available. Please install langchain_huggingface and transformers.")
     return None
 
-# Get LLM with fallbacks
+# Initialize LLM with fallbacks
 @st.cache_resource
 def get_llm():
-    # Try Ollama first (preferred option)
-    ollama_urls = [
-        os.environ.get("OLLAMA_BASE_URL"),
-        "http://ollama:11434",
-        "http://localhost:11434"
-    ]
-    
-    for url in ollama_urls:
-        if not url:
-            continue
+    # First try Ollama if available
+    if OLLAMA_AVAILABLE:
+        ollama_urls = [
+            os.environ.get("OLLAMA_BASE_URL"),
+            "http://ollama:11434",
+            "http://localhost:11434"
+        ]
         
-        if is_ollama_available(url):
-            try:
-                llm = ChatOllama(
-                    base_url=url,
-                    model="mistral",
-                    temperature=0.1
-                )
-                st.success(f"Using Ollama LLM (mistral) at {url}")
-                return llm
-            except Exception as e:
-                st.warning(f"Ollama available but LLM failed: {str(e)}")
+        for url in ollama_urls:
+            if not url:
+                continue
+            
+            if is_ollama_available(url):
+                try:
+                    llm = ChatOllama(
+                        base_url=url,
+                        model="mistral",
+                        temperature=0.1
+                    )
+                    st.success(f"Using Ollama LLM with mistral")
+                    return llm
+                except Exception as e:
+                    st.warning(f"Failed to use Ollama LLM: {str(e)}")
     
-    # Try OpenAI if available
-    if OPENAI_AVAILABLE and os.environ.get("OPENAI_API_KEY"):
+    # Fallback to Hugging Face pipeline
+    if HF_PIPELINE_AVAILABLE:
         try:
-            llm = ChatOpenAI(temperature=0.1)
-            st.success("Using OpenAI LLM (fallback)")
-            return llm
-        except Exception as e:
-            st.warning(f"OpenAI LLM failed: {str(e)}")
-    
-    # Try HuggingFace if available
-    if HUGGINGFACE_AVAILABLE and os.environ.get("HUGGINGFACE_API_KEY"):
-        try:
-            llm = HuggingFaceEndpoint(
-                repo_id="mistralai/Mistral-7B-Instruct-v0.2",
-                max_length=512,
+            # Try a lightweight model that can run on CPU
+            model_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+            
+            tokenizer = AutoTokenizer.from_pretrained(model_id)
+            model = AutoModelForCausalLM.from_pretrained(
+                model_id, 
+                device_map="auto",
+                load_in_8bit=True  # Use quantization to reduce memory usage
+            )
+            
+            pipe = pipeline(
+                "text-generation",
+                model=model,
+                tokenizer=tokenizer,
+                max_new_tokens=512,
                 temperature=0.1
             )
-            st.success("Using HuggingFace Mistral LLM (fallback)")
+            
+            llm = HuggingFacePipeline(pipeline=pipe)
+            st.success(f"Using Hugging Face TinyLlama LLM")
             return llm
         except Exception as e:
-            st.warning(f"HuggingFace LLM failed: {str(e)}")
+            st.error(f"Failed to load TinyLlama: {str(e)}")
     
-    st.error("No LLM models available. Please configure at least one LLM provider.")
+    st.error("No LLM available. Please install transformers and torch.")
     return None
 
 def process_document(file, progress_bar=None, status_text=None):
@@ -250,7 +267,7 @@ def process_document(file, progress_bar=None, status_text=None):
                 
             embeddings = get_embeddings()
             if embeddings is None:
-                status_text.text("Error: No embedding model available. Please configure an embedding provider.")
+                status_text.text("Error: Embedding model not available. Please check embedding configuration.")
                 return None, 0, 0
             
             collection_name = file.name.replace('.pdf', '').replace(' ', '_').lower()
@@ -261,13 +278,14 @@ def process_document(file, progress_bar=None, status_text=None):
                     status_text.text(f"Collection {collection_name} already exists. Recreating...")
                     client.delete_collection(collection_name)
                 
-                # Get vector size from the embedding model
-                vector_size = len(embeddings.embed_query("test"))
+                # Get the embedding dimension from the model
+                test_embedding = embeddings.embed_query("test")
+                embedding_size = len(test_embedding)
                 
                 client.create_collection(
                     collection_name=collection_name,
                     vectors_config=models.VectorParams(
-                        size=vector_size,
+                        size=embedding_size,
                         distance=models.Distance.COSINE
                     )
                 )
@@ -319,55 +337,29 @@ with st.sidebar:
     # Model configuration section
     st.subheader("Model Configuration")
     
-    # Show current configuration
-    embedding_provider = "Not configured"
-    llm_provider = "Not configured"
-    
-    # Check which providers are available
+    # Display current embedding model
     embeddings = get_embeddings()
     if embeddings:
-        embedding_provider = type(embeddings).__name__
+        if hasattr(embeddings, 'model'):
+            st.success(f"Using embedding model: {embeddings.model}")
+        elif hasattr(embeddings, 'model_name'):
+            st.success(f"Using embedding model: {embeddings.model_name}")
+        else:
+            st.success(f"Using embedding model: {type(embeddings).__name__}")
+    else:
+        st.error("No embedding model available")
     
+    # Display current LLM
     llm = get_llm()
     if llm:
-        llm_provider = type(llm).__name__
-    
-    st.info(f"Embedding model: {embedding_provider}")
-    st.info(f"LLM: {llm_provider}")
-    
-    # API key configuration
-    with st.expander("Configure API Keys"):
-        openai_api_key = st.text_input(
-            "OpenAI API Key (fallback)", 
-            type="password",
-            value=os.environ.get("OPENAI_API_KEY", "")
-        )
-        
-        hf_api_key = st.text_input(
-            "HuggingFace API Key (fallback)", 
-            type="password",
-            value=os.environ.get("HUGGINGFACE_API_KEY", "")
-        )
-        
-        ollama_url = st.text_input(
-            "Ollama URL (preferred)", 
-            value=os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-        )
-        
-        if st.button("Save API Configuration"):
-            if openai_api_key:
-                os.environ["OPENAI_API_KEY"] = openai_api_key
-            
-            if hf_api_key:
-                os.environ["HUGGINGFACE_API_KEY"] = hf_api_key
-                
-            if ollama_url:
-                os.environ["OLLAMA_BASE_URL"] = ollama_url
-                
-            # Clear cached resources to reload with new settings
-            st.cache_resource.clear()
-            st.success("API configuration updated")
-            st.rerun()
+        if hasattr(llm, 'model'):
+            st.success(f"Using LLM: {llm.model}")
+        elif hasattr(llm, 'model_name'):
+            st.success(f"Using LLM: {llm.model_name}")
+        else:
+            st.success(f"Using LLM: {type(llm).__name__}")
+    else:
+        st.error("No LLM available")
     
     # Qdrant configuration section
     st.subheader("Qdrant Configuration")
@@ -377,7 +369,7 @@ with st.sidebar:
     if qdrant_url:
         st.success("Qdrant Cloud configured")
     else:
-        st.warning("Qdrant Cloud not configured")
+        st.warning("Using local Qdrant")
         
     # Allow setting configuration in the UI
     with st.expander("Configure Qdrant Cloud"):
@@ -386,13 +378,18 @@ with st.sidebar:
                                            value=os.environ.get("QDRANT_API_KEY", ""))
         
         if st.button("Save Qdrant Configuration"):
+            # In Streamlit Cloud, we can't modify environment variables directly
+            # This is a workaround to store them in session state
+            st.session_state.qdrant_url = qdrant_url_input
+            st.session_state.qdrant_api_key = qdrant_api_key_input
+            
             # Update the environment variables for the current session
             os.environ["QDRANT_URL"] = qdrant_url_input
             os.environ["QDRANT_API_KEY"] = qdrant_api_key_input
             
             # Clear the cached client to force recreation
             st.cache_resource.clear()
-            st.success("Qdrant configuration updated")
+            st.success("Qdrant configuration updated. Reconnecting...")
             st.rerun()
     
     # Collection management section
@@ -408,14 +405,12 @@ with st.sidebar:
             st.error(f"Error fetching collections: {str(e)}")
     
     if collection_names:
-        default_index = 0
-        if "collection_name" in st.session_state and st.session_state.collection_name in collection_names:
-            default_index = collection_names.index(st.session_state.collection_name)
-            
         selected_collection = st.selectbox(
             "Select an existing collection", 
             options=collection_names,
-            index=default_index
+            index=0 if "collection_name" not in st.session_state else 
+                  collection_names.index(st.session_state.collection_name) if 
+                  st.session_state.collection_name in collection_names else 0
         )
         
         if st.button("Use Selected Collection"):
@@ -483,3 +478,7 @@ if prompt := st.chat_input("Ask a question about your document"):
     llm = get_llm()
     
     # Check if all required components are available
+    if client is None:
+        with st.chat_message("assistant"):
+            st.error("Qdrant client not available. Please configure Qdrant connection.")
+            st.session_state.messages.append({"role": "assistant", "content": "Sorry, I can't answer your question because the Qdrant client is not available."})
