@@ -323,7 +323,7 @@ with st.sidebar:
             # Clear the cached client to force recreation
             st.cache_resource.clear()
             st.success("Ollama configuration updated. Reconnecting...")
-            st.experimental_rerun()
+            st.rerun()
     
     # Qdrant configuration section
     st.subheader("Qdrant Configuration")
