@@ -1,0 +1,9 @@
+streamlit==1.32.0
+langchain  # Remove `==0.1.6`
+langchain-ollama  # Remove `==0.0.1`
+langchain-community
+#qdrant-client==1.7.0
+pypdf==4.0.1
+python-dotenv==1.0.0
+langchain-qdrant==0.2.0
+qdrant-client>=1.8.0
