@@ -1,209 +1,44 @@
 import os
 import tempfile
 import streamlit as st
-from langchain_community.document_loaders import PyPDFLoader
+from langchain_community.document_loaders import PyPDFLoader, DirectoryLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_ollama import OllamaEmbeddings
 from langchain_qdrant import Qdrant
+from langchain_ollama import ChatOllama
+from langchain.chains import RetrievalQA
 from qdrant_client import QdrantClient, models
 import time
 import math
-import requests
-from typing import List, Optional
-
-# Try to import Ollama-specific modules, but have fallbacks
-try:
-    from langchain_ollama import OllamaEmbeddings, ChatOllama
-    OLLAMA_AVAILABLE = True
-except ImportError:
-    OLLAMA_AVAILABLE = False
-
-# Import alternative embedding models
-try:
-    from langchain_huggingface import HuggingFaceEmbeddings
-    HF_EMBEDDINGS_AVAILABLE = True
-except ImportError:
-    HF_EMBEDDINGS_AVAILABLE = False
-
-# Import alternative LLMs
-try:
-    from langchain_community.llms import HuggingFacePipeline
-    from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
-    HF_PIPELINE_AVAILABLE = True
-except ImportError:
-    HF_PIPELINE_AVAILABLE = False
 
 # App title
-st.title("📚 RAG with Open-Source Models")
+st.title("📚 RAG with Ollama, Qdrant, and LangChain")
 
-# Initialize Qdrant client with better error handling
+# Initialize Qdrant client
 @st.cache_resource
 def get_qdrant_client():
-    # Check for Qdrant Cloud configuration
-    qdrant_url = os.environ.get("QDRANT_URL")
-    qdrant_api_key = os.environ.get("QDRANT_API_KEY")
-    
-    # If Qdrant Cloud credentials are available, use them
-    if qdrant_url and qdrant_api_key:
-        try:
-            client = QdrantClient(
-                url=qdrant_url,
-                api_key=qdrant_api_key,
-            )
-            # Test connection
-            client.get_collections()
-            st.success("Connected to Qdrant Cloud")
-            return client
-        except Exception as e:
-            st.error(f"Failed to connect to Qdrant Cloud: {str(e)}")
-    
-    # Try local Qdrant (for development)
-    try:
-        # Try localhost first (for local development without Docker)
-        client = QdrantClient(
-            host="localhost",
-            port=6333,
-            timeout=5.0  # Short timeout to fail fast
-        )
-        # Test connection
-        client.get_collections()
-        st.success("Connected to local Qdrant")
-        return client
-    except Exception as local_error:
-        try:
-            # Try Docker container name (for Docker Compose setup)
-            client = QdrantClient(
-                host="qdrant",
-                port=6333,
-                timeout=5.0
-            )
-            # Test connection
-            client.get_collections()
-            st.success("Connected to Qdrant in Docker")
-            return client
-        except Exception as docker_error:
-            st.error("Could not connect to any Qdrant instance")
-            st.info("Please configure Qdrant Cloud credentials or ensure local Qdrant is running")
-            return None
+    return QdrantClient(
+        host=os.environ.get("QDRANT_HOST", "qdrant"),
+        port=6333,
+        prefer_grpc=True
+    )
 
-# Check if Ollama is available
-def is_ollama_available(base_url):
-    try:
-        response = requests.get(f"{base_url}/api/tags", timeout=5)
-        return response.status_code == 200
-    except:
-        return False
-
-# Initialize embedding model with fallbacks
+# Initialize embedding model
 @st.cache_resource
 def get_embeddings():
-    # First try Ollama if available
-    if OLLAMA_AVAILABLE:
-        ollama_urls = [
-            os.environ.get("OLLAMA_BASE_URL"),
-            "http://ollama:11434",
-            "http://localhost:11434"
-        ]
-        
-        for url in ollama_urls:
-            if not url:
-                continue
-            
-            if is_ollama_available(url):
-                try:
-                    embeddings = OllamaEmbeddings(
-                        model="nomic-embed-text",
-                        base_url=url
-                    )
-                    # Test the embeddings
-                    embeddings.embed_query("test")
-                    st.success(f"Using Ollama embeddings with nomic-embed-text")
-                    return embeddings
-                except Exception as e:
-                    st.warning(f"Failed to use Ollama embeddings: {str(e)}")
-    
-    # Fallback to Hugging Face embeddings
-    if HF_EMBEDDINGS_AVAILABLE:
-        try:
-            # Try GTE-Small (a good open-source model)
-            embeddings = HuggingFaceEmbeddings(
-                model_name="thenlper/gte-small",
-                cache_folder="./models"
-            )
-            st.success("Using Hugging Face GTE-Small embeddings")
-            return embeddings
-        except Exception as e:
-            st.warning(f"Failed to load GTE-Small: {str(e)}")
-            
-            try:
-                # Try another lightweight model
-                embeddings = HuggingFaceEmbeddings(
-                    model_name="sentence-transformers/all-MiniLM-L6-v2",
-                    cache_folder="./models"
-                )
-                st.success("Using Hugging Face MiniLM embeddings")
-                return embeddings
-            except Exception as e2:
-                st.error(f"Failed to load alternative embeddings: {str(e2)}")
-    
-    st.error("No embedding models available. Please install langchain_huggingface and transformers.")
-    return None
+    return OllamaEmbeddings(
+        model="nomic-embed-text",
+        base_url=os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434")
+    )
 
-# Initialize LLM with fallbacks
+# Initialize LLM
 @st.cache_resource
 def get_llm():
-    # First try Ollama if available
-    if OLLAMA_AVAILABLE:
-        ollama_urls = [
-            os.environ.get("OLLAMA_BASE_URL"),
-            "http://ollama:11434",
-            "http://localhost:11434"
-        ]
-        
-        for url in ollama_urls:
-            if not url:
-                continue
-            
-            if is_ollama_available(url):
-                try:
-                    llm = ChatOllama(
-                        base_url=url,
-                        model="mistral",
-                        temperature=0.1
-                    )
-                    st.success(f"Using Ollama LLM with mistral")
-                    return llm
-                except Exception as e:
-                    st.warning(f"Failed to use Ollama LLM: {str(e)}")
-    
-    # Fallback to Hugging Face pipeline
-    if HF_PIPELINE_AVAILABLE:
-        try:
-            # Try a lightweight model that can run on CPU
-            model_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-            
-            tokenizer = AutoTokenizer.from_pretrained(model_id)
-            model = AutoModelForCausalLM.from_pretrained(
-                model_id, 
-                device_map="auto",
-                load_in_8bit=True  # Use quantization to reduce memory usage
-            )
-            
-            pipe = pipeline(
-                "text-generation",
-                model=model,
-                tokenizer=tokenizer,
-                max_new_tokens=512,
-                temperature=0.1
-            )
-            
-            llm = HuggingFacePipeline(pipeline=pipe)
-            st.success(f"Using Hugging Face TinyLlama LLM")
-            return llm
-        except Exception as e:
-            st.error(f"Failed to load TinyLlama: {str(e)}")
-    
-    st.error("No LLM available. Please install transformers and torch.")
-    return None
+    return ChatOllama(
+        base_url=os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434"),
+        model="mistral",
+        temperature=0.1
+    )
 
 def process_document(file, progress_bar=None, status_text=None):
     with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
@@ -261,37 +96,22 @@ def process_document(file, progress_bar=None, status_text=None):
             status_text.text(f"Created {len(chunks)} chunks from {total_pages} pages. Embedding chunks...")
             
             client = get_qdrant_client()
-            if client is None:
-                status_text.text("Error: Qdrant client not available. Please configure Qdrant connection.")
-                return None, 0, 0
-                
             embeddings = get_embeddings()
-            if embeddings is None:
-                status_text.text("Error: Embedding model not available. Please check embedding configuration.")
-                return None, 0, 0
             
             collection_name = file.name.replace('.pdf', '').replace(' ', '_').lower()
             
             # Create or recreate collection
-            try:
-                if client.collection_exists(collection_name):
-                    status_text.text(f"Collection {collection_name} already exists. Recreating...")
-                    client.delete_collection(collection_name)
-                
-                # Get the embedding dimension from the model
-                test_embedding = embeddings.embed_query("test")
-                embedding_size = len(test_embedding)
-                
-                client.create_collection(
-                    collection_name=collection_name,
-                    vectors_config=models.VectorParams(
-                        size=embedding_size,
-                        distance=models.Distance.COSINE
-                    )
+            if client.collection_exists(collection_name):
+                status_text.text(f"Collection {collection_name} already exists. Recreating...")
+                client.delete_collection(collection_name)
+            
+            client.create_collection(
+                collection_name=collection_name,
+                vectors_config=models.VectorParams(
+                    size=768,
+                    distance=models.Distance.COSINE
                 )
-            except Exception as e:
-                status_text.text(f"Error creating collection: {str(e)}")
-                return None, 0, 0
+            )
             
             # For large chunk sets, batch the embeddings
             vectorstore = Qdrant(
@@ -334,83 +154,17 @@ def process_document(file, progress_bar=None, status_text=None):
 with st.sidebar:
     st.header("Document Processing")
     
-    # Model configuration section
-    st.subheader("Model Configuration")
-    
-    # Display current embedding model
-    embeddings = get_embeddings()
-    if embeddings:
-        if hasattr(embeddings, 'model'):
-            st.success(f"Using embedding model: {embeddings.model}")
-        elif hasattr(embeddings, 'model_name'):
-            st.success(f"Using embedding model: {embeddings.model_name}")
-        else:
-            st.success(f"Using embedding model: {type(embeddings).__name__}")
-    else:
-        st.error("No embedding model available")
-    
-    # Display current LLM
-    llm = get_llm()
-    if llm:
-        if hasattr(llm, 'model'):
-            st.success(f"Using LLM: {llm.model}")
-        elif hasattr(llm, 'model_name'):
-            st.success(f"Using LLM: {llm.model_name}")
-        else:
-            st.success(f"Using LLM: {type(llm).__name__}")
-    else:
-        st.error("No LLM available")
-    
-    # Qdrant configuration section
-    st.subheader("Qdrant Configuration")
-    
-    # Show current configuration
-    qdrant_url = os.environ.get("QDRANT_URL", "")
-    if qdrant_url:
-        st.success("Qdrant Cloud configured")
-    else:
-        st.warning("Using local Qdrant")
-        
-    # Allow setting configuration in the UI
-    with st.expander("Configure Qdrant Cloud"):
-        qdrant_url_input = st.text_input("Qdrant URL", value=qdrant_url)
-        qdrant_api_key_input = st.text_input("Qdrant API Key", type="password", 
-                                           value=os.environ.get("QDRANT_API_KEY", ""))
-        
-        if st.button("Save Qdrant Configuration"):
-            # In Streamlit Cloud, we can't modify environment variables directly
-            # This is a workaround to store them in session state
-            st.session_state.qdrant_url = qdrant_url_input
-            st.session_state.qdrant_api_key = qdrant_api_key_input
-            
-            # Update the environment variables for the current session
-            os.environ["QDRANT_URL"] = qdrant_url_input
-            os.environ["QDRANT_API_KEY"] = qdrant_api_key_input
-            
-            # Clear the cached client to force recreation
-            st.cache_resource.clear()
-            st.success("Qdrant configuration updated. Reconnecting...")
-            st.rerun()
-    
     # Collection management section
     st.subheader("Collections")
     client = get_qdrant_client()
-    
-    collection_names = []
-    if client is not None:
-        try:
-            collections = client.get_collections().collections
-            collection_names = [c.name for c in collections] if collections else []
-        except Exception as e:
-            st.error(f"Error fetching collections: {str(e)}")
+    collections = client.get_collections().collections
+    collection_names = [c.name for c in collections] if collections else []
     
     if collection_names:
         selected_collection = st.selectbox(
             "Select an existing collection", 
             options=collection_names,
-            index=0 if "collection_name" not in st.session_state else 
-                  collection_names.index(st.session_state.collection_name) if 
-                  st.session_state.collection_name in collection_names else 0
+            index=0 if "collection_name" not in st.session_state else collection_names.index(st.session_state.collection_name) if st.session_state.collection_name in collection_names else 0
         )
         
         if st.button("Use Selected Collection"):
@@ -431,31 +185,24 @@ with st.sidebar:
         st.write(file_details)
         
         if st.button("Process Document"):
-            if client is None:
-                st.error("Qdrant client not available. Please configure Qdrant connection first.")
-            else:
-                # Create a progress bar and status text
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-                
-                try:
-                    with st.spinner("Processing document..."):
-                        collection_name, num_chunks, total_pages = process_document(
-                            uploaded_file, 
-                            progress_bar=progress_bar,
-                            status_text=status_text
-                        )
-                        
-                        if collection_name:
-                            st.session_state.collection_name = collection_name
-                            st.success(f"Document processed into {num_chunks} chunks from {total_pages} pages and stored in collection: {collection_name}")
-                        else:
-                            st.error("Failed to process document")
-                except Exception as e:
-                    st.error(f"Error processing document: {str(e)}")
-                finally:
-                    # Ensure progress bar completes even if there's an error
-                    progress_bar.progress(100/100)
+            # Create a progress bar and status text
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            try:
+                with st.spinner("Processing document..."):
+                    collection_name, num_chunks, total_pages = process_document(
+                        uploaded_file, 
+                        progress_bar=progress_bar,
+                        status_text=status_text
+                    )
+                    st.session_state.collection_name = collection_name
+                    st.success(f"Document processed into {num_chunks} chunks from {total_pages} pages and stored in collection: {collection_name}")
+            except Exception as e:
+                st.error(f"Error processing document: {str(e)}")
+            finally:
+                # Ensure progress bar completes even if there's an error
+                progress_bar.progress(100/100)
 
 # Main chat interface
 st.subheader("Ask questions about your document")
@@ -477,8 +224,46 @@ if prompt := st.chat_input("Ask a question about your document"):
     embeddings = get_embeddings()
     llm = get_llm()
     
-    # Check if all required components are available
-    if client is None:
-        with st.chat_message("assistant"):
-            st.error("Qdrant client not available. Please configure Qdrant connection.")
-            st.session_state.messages.append({"role": "assistant", "content": "Sorry, I can't answer your question because the Qdrant client is not available."})
+    if "collection_name" in st.session_state:
+        collection_name = st.session_state.collection_name
+        vectorstore = Qdrant(
+            client=client,
+            collection_name=collection_name,
+            embeddings=embeddings
+        )
+        # Increase k for large documents to get more context
+        retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
+    else:
+        retriever = None  # No retriever available when no document is uploaded
+    
+    with st.chat_message("assistant"):
+        answer_container = st.empty()
+        
+        with st.spinner("Thinking..."):
+            if retriever:
+                qa_chain = RetrievalQA.from_chain_type(
+                    llm=llm,
+                    retriever=retriever,
+                    chain_type="stuff",
+                    return_source_documents=True
+                )
+                response = qa_chain({"query": prompt})
+                answer = response["result"]
+                
+                # Optional: Display source documents in an expandable section
+                with st.expander("View Source Documents"):
+                    for i, doc in enumerate(response["source_documents"]):
+                        st.markdown(f"**Source {i+1}:**")
+                        st.markdown(doc.page_content)
+                        st.markdown("---")
+            else:
+                response = llm.invoke(prompt)
+                # Extract just the content from the response
+                if hasattr(response, 'content'):
+                    answer = response.content
+                else:
+                    answer = str(response)
+            
+            answer_container.markdown(answer)
+            
+            st.session_state.messages.append({"role": "assistant", "content": answer})
